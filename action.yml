@@ -1,0 +1,166 @@
+name: 'MonkCI Build and Push Docker Images'
+description: 'Build and push Docker images with persistent cache. Drop-in replacement for docker/build-push-action.'
+author: 'MonkCI'
+
+branding:
+  icon: 'package'
+  color: 'purple'
+
+inputs:
+  context:
+    description: "Build context path"
+    required: false
+    default: '.'
+  file:
+    description: 'Path to Dockerfile'
+    required: false
+  tags:
+    description: 'List of tags (comma or newline separated)'
+    required: false
+  push:
+    description: 'Push to registry'
+    required: false
+    default: 'false'
+  load:
+    description: 'Load into local Docker'
+    required: false
+    default: 'false'
+  platforms:
+    description: 'Target platforms (e.g., linux/amd64,linux/arm64)'
+    required: false
+  build-args:
+    description: 'Build-time variables (newline separated)'
+    required: false
+  target:
+    description: 'Target build stage'
+    required: false
+  secrets:
+    description: 'Build secrets (newline separated)'
+    required: false
+  labels:
+    description: 'Image metadata labels (newline separated)'
+    required: false
+  cache-from:
+    description: 'External cache sources'
+    required: false
+  cache-to:
+    description: 'Cache export destinations'
+    required: false
+  provenance:
+    description: 'Provenance attestation'
+    required: false
+  sbom:
+    description: 'SBOM attestation'
+    required: false
+  no-cache:
+    description: 'Skip cache'
+    required: false
+    default: 'false'
+
+outputs:
+  digest:
+    description: 'Image digest'
+    value: ${{ steps.build.outputs.digest }}
+  metadata:
+    description: 'Build metadata JSON'
+    value: ${{ steps.build.outputs.metadata }}
+  build-duration:
+    description: 'Build duration in seconds'
+    value: ${{ steps.build.outputs.duration }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Build Docker image
+      id: build
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        BUILDER="${MONKCI_BUILDER:-}"
+        if [ -n "${BUILDER}" ]; then
+          docker buildx use "${BUILDER}" 2>/dev/null || true
+        fi
+
+        CMD=(docker buildx build)
+        META_FILE=$(mktemp)
+        CMD+=(--metadata-file "${META_FILE}")
+
+        TAGS="${{ inputs.tags }}"
+        if [ -n "${TAGS}" ]; then
+          while IFS= read -r line || [ -n "${line}" ]; do
+            IFS=',' read -ra PARTS <<< "${line}"
+            for tag in "${PARTS[@]}"; do
+              tag=$(echo "${tag}" | xargs)
+              [ -n "${tag}" ] && CMD+=(--tag "${tag}")
+            done
+          done <<< "${TAGS}"
+        fi
+
+        [ "${{ inputs.push }}" = "true" ] && CMD+=(--push)
+        [ "${{ inputs.load }}" = "true" ] && CMD+=(--load)
+        [ "${{ inputs.no-cache }}" = "true" ] && CMD+=(--no-cache)
+        [ -n "${{ inputs.file }}" ] && CMD+=(--file "${{ inputs.file }}")
+        [ -n "${{ inputs.platforms }}" ] && CMD+=(--platform "${{ inputs.platforms }}")
+        [ -n "${{ inputs.target }}" ] && CMD+=(--target "${{ inputs.target }}")
+        [ -n "${{ inputs.provenance }}" ] && CMD+=(--provenance "${{ inputs.provenance }}")
+        [ -n "${{ inputs.sbom }}" ] && CMD+=(--sbom "${{ inputs.sbom }}")
+
+        BUILD_ARGS="${{ inputs.build-args }}"
+        if [ -n "${BUILD_ARGS}" ]; then
+          while IFS= read -r arg || [ -n "${arg}" ]; do
+            arg=$(echo "${arg}" | xargs)
+            [ -n "${arg}" ] && CMD+=(--build-arg "${arg}")
+          done <<< "${BUILD_ARGS}"
+        fi
+
+        SECRETS="${{ inputs.secrets }}"
+        if [ -n "${SECRETS}" ]; then
+          while IFS= read -r s || [ -n "${s}" ]; do
+            s=$(echo "${s}" | xargs)
+            [ -n "${s}" ] && CMD+=(--secret "${s}")
+          done <<< "${SECRETS}"
+        fi
+
+        LABELS="${{ inputs.labels }}"
+        if [ -n "${LABELS}" ]; then
+          while IFS= read -r l || [ -n "${l}" ]; do
+            l=$(echo "${l}" | xargs)
+            [ -n "${l}" ] && CMD+=(--label "${l}")
+          done <<< "${LABELS}"
+        fi
+
+        CACHE_FROM="${{ inputs.cache-from }}"
+        if [ -n "${CACHE_FROM}" ]; then
+          while IFS= read -r cf || [ -n "${cf}" ]; do
+            cf=$(echo "${cf}" | xargs)
+            [ -n "${cf}" ] && CMD+=(--cache-from "${cf}")
+          done <<< "${CACHE_FROM}"
+        fi
+
+        CACHE_TO="${{ inputs.cache-to }}"
+        if [ -n "${CACHE_TO}" ]; then
+          while IFS= read -r ct || [ -n "${ct}" ]; do
+            ct=$(echo "${ct}" | xargs)
+            [ -n "${ct}" ] && CMD+=(--cache-to "${ct}")
+          done <<< "${CACHE_TO}"
+        fi
+
+        CMD+=("${{ inputs.context }}")
+
+        echo "::group::MonkCI Docker Build"
+        START=$(date +%s)
+        "${CMD[@]}"
+        END=$(date +%s)
+        DURATION=$((END - START))
+        echo "Build completed in ${DURATION}s"
+        echo "::endgroup::"
+
+        echo "duration=${DURATION}" >> "$GITHUB_OUTPUT"
+
+        if [ -f "${META_FILE}" ] && [ -s "${META_FILE}" ]; then
+          echo "metadata=$(cat ${META_FILE})" >> "$GITHUB_OUTPUT"
+          DIGEST=$(jq -r '."containerimage.digest" // empty' "${META_FILE}" 2>/dev/null || true)
+          [ -n "${DIGEST}" ] && echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+        fi
+        rm -f "${META_FILE}"

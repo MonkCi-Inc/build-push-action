@@ -161,6 +161,7 @@ runs:
         if [ -f "${META_FILE}" ] && [ -s "${META_FILE}" ]; then
             echo "metadata<<MONKCI_EOF" >> "$GITHUB_OUTPUT"
             cat "${META_FILE}" >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_OUTPUT"
             echo "MONKCI_EOF" >> "$GITHUB_OUTPUT"
             DIGEST=$(jq -r '."containerimage.digest" // empty' "${META_FILE}" 2>/dev/null || true)
             [ -n "${DIGEST}" ] && echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
